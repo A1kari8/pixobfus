@@ -1,9 +1,9 @@
 use clap::Parser;
 use image::{GenericImage, GenericImageView, ImageFormat, RgbaImage};
-use rand::distr::StandardUniform;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
@@ -17,13 +17,66 @@ struct Args {
     input: String,
 
     #[arg(short, long)]
-    seed: Option<u64>,
+    key: Option<String>,
 
     #[arg(short, long, default_value_t = 8)]
     block: u32,
 
     #[arg(short, long)]
     output: Option<String>,
+
+    /// 执行混淆
+    #[arg(short, long, conflicts_with = "restore")]
+    scramble: bool,
+
+    /// 执行还原
+    #[arg(short, long, conflicts_with = "scramble")]
+    restore: bool,
+}
+
+/// 将字符串转为u64种子
+fn derive_seed(key: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(SIGNATURE);
+    hasher.update(key.as_bytes());
+    let result = hasher.finalize();
+    // 取前8个字节
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&result[0..8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn generate_random_phrase() -> String {
+    let adjs = [
+        "ancient", "broken", "clever", "distant", "emerald", "flying", "giant", "hidden", "iron",
+        "jolly", "kind", "lucky", "mystic", "neon", "odd", "pure", "quiet", "rapid", "silver",
+        "tiny", "ultra", "vivid", "wild", "young",
+    ];
+    let colors = [
+        "red", "blue", "green", "yellow", "purple", "orange", "pink", "brown", "black", "white",
+        "cyan", "magenta", "gold", "silver", "amber", "teal",
+    ];
+    let nouns = [
+        "tiger", "forest", "mountain", "nebula", "river", "phoenix", "shadow", "storm", "rabbit",
+        "ocean", "star", "wolf", "eagle", "dragon", "hammer", "cloud", "knight", "wizard",
+        "castle", "bridge", "spirit", "comet", "stone", "flame",
+    ];
+
+    let mut rng = rand::rng();
+    let adj = adjs.choose(&mut rng).unwrap();
+    let color = colors.choose(&mut rng).unwrap();
+    let noun = nouns.choose(&mut rng).unwrap();
+    let num: u16 = rng.random_range(100..999);
+
+    format!("{}-{}-{}-{}", adj, color, noun, num)
+}
+
+fn check_signature(data: &[u8]) -> bool {
+    if data.len() < SIGNATURE.len() + 4 {
+        return false;
+    }
+    let sig_pos = data.len() - SIGNATURE.len() - 4;
+    &data[sig_pos..sig_pos + SIGNATURE.len()] == SIGNATURE
 }
 
 fn main() {
@@ -35,22 +88,45 @@ fn main() {
         exit(1);
     });
 
-    let is_scrambled = file_bytes.ends_with(SIGNATURE);
+    let has_signature = check_signature(&file_bytes);
 
-    // 仅在生成新种子时打印
-    let seed = match args.seed {
-        Some(s) => s,
+    let is_scrambled = if args.scramble {
+        false // 混淆
+    } else if args.restore {
+        if !has_signature {
+            eprintln!("Error: Input file does not have the expected signature for restoration.");
+            exit(1);
+        }
+        true // 还原
+    } else {
+        has_signature // 默认自动识别
+    };
+
+    let seed = match args.key {
+        Some(ref k) => k.parse::<u64>().unwrap_or_else(|_| derive_seed(k)),
         None => {
             if is_scrambled {
-                eprintln!("Error: Seed (-s) is required for de-obfuscation.");
+                eprintln!("Error: Key (-k) is required for de-obfuscation.");
                 exit(1);
             } else {
-                let s: u64 = rand::rng().sample(StandardUniform);
-                println!("{}", s);
-                s
+                // 生成短语密钥
+                let phrase = generate_random_phrase();
+                println!("Generated secret key: {}", phrase);
+                derive_seed(&phrase)
             }
         }
     };
+
+    if is_scrambled {
+        // 签名13字节，校验位4字节
+        let expected_check = &file_bytes[file_bytes.len() - 4..];
+        let actual_check = &seed.to_le_bytes()[0..4];
+
+        if expected_check != actual_check {
+            eprintln!("Error: Invalid Key! The pixels will not be restored correctly.");
+            exit(1);
+        }
+    }
 
     let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
         eprintln!("Error decoding image: {}", e);
@@ -66,28 +142,48 @@ fn main() {
     }
 
     let mut indices: Vec<usize> = (0..(cols * rows) as usize).collect();
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    indices.shuffle(&mut rng);
+    let mut shuffle_rng = ChaCha8Rng::seed_from_u64(seed);
+    indices.shuffle(&mut shuffle_rng);
     let num_blocks = indices.len();
 
-    let target_indices = if is_scrambled {
-        let mut inv = vec![0; num_blocks];
-        for (i, &val) in indices.iter().enumerate() {
-            inv[val] = i;
+    let mut color_rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut all_masks = Vec::with_capacity(num_blocks);
+    for _ in 0..num_blocks {
+        let mut block_mask = vec![0u8; (block_size * block_size * 3) as usize];
+        for i in 0..(block_size * block_size) as usize {
+            let r: u32 = color_rng.random();
+            let b = r.to_le_bytes();
+            block_mask[i * 3] = b[0];
+            block_mask[i * 3 + 1] = b[1];
+            block_mask[i * 3 + 2] = b[2];
         }
-        inv
-    } else {
-        indices
-    };
+        all_masks.push(block_mask);
+    }
 
     let mut out_img = RgbaImage::new(cols * block_size, rows * block_size);
     for i in 0..num_blocks {
-        let (src_idx, dest_idx) = (i as u32, target_indices[i] as u32);
-        let src_x = (src_idx % cols) * block_size;
-        let src_y = (src_idx / cols) * block_size;
-        let dest_x = (dest_idx % cols) * block_size;
-        let dest_y = (dest_idx / cols) * block_size;
-        let part = img.view(src_x, src_y, block_size, block_size).to_image();
+        let (src_idx, dest_idx) = if !is_scrambled {
+            // 混淆：从原位置i取块，经过XOR后放到打乱后的位置indices[i]
+            (i, indices[i])
+        } else {
+            // 还原：从混淆后的位置indices[i]取块，经过XOR放回原位置 i
+            (indices[i], i)
+        };
+
+        let src_x = (src_idx as u32 % cols) * block_size;
+        let src_y = (src_idx as u32 / cols) * block_size;
+        let dest_x = (dest_idx as u32 % cols) * block_size;
+        let dest_y = (dest_idx as u32 / cols) * block_size;
+        let mut part = img.view(src_x, src_y, block_size, block_size).to_image();
+
+        // 对颜色进行异或
+        let mask = &all_masks[i];
+        for (px_idx, pixel) in part.pixels_mut().enumerate() {
+            pixel.0[0] ^= mask[px_idx * 3];
+            pixel.0[1] ^= mask[px_idx * 3 + 1];
+            pixel.0[2] ^= mask[px_idx * 3 + 2];
+        }
+
         out_img.copy_from(&part, dest_x, dest_y).unwrap();
     }
 
@@ -107,6 +203,7 @@ fn main() {
 
     if !is_scrambled {
         final_data.extend_from_slice(SIGNATURE);
+        final_data.extend_from_slice(&seed.to_le_bytes()[0..4]);
     }
 
     fs::write(&output_path, final_data).unwrap_or_else(|e| {
