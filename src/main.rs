@@ -1,8 +1,9 @@
 use bip39::Mnemonic;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use image::{GenericImage, GenericImageView, ImageFormat, RgbaImage};
-use rand::RngExt;
 use rand::seq::IndexedRandom;
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
@@ -10,6 +11,12 @@ use std::path::Path;
 use std::process::exit;
 
 const BLOCK_SIZE: u32 = 8;
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Curve {
+    Morton,
+    Gilbert,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,10 +27,13 @@ struct Args {
     #[arg(short = 'R', long, conflicts_with = "obfuscate")]
     restore: bool,
 
-    #[arg(short, long)]
+    #[arg(short = 'k', long)]
     key: Option<String>,
 
-    #[arg(short, long)]
+    #[arg(short = 'c', long, value_enum, default_value = "gilbert")]
+    curve: Curve,
+
+    #[arg(short = 'o', long)]
     output: Option<String>,
 
     input: String,
@@ -100,8 +110,15 @@ fn rearrange_blocks(
     indices: &[usize],
     cols: u32,
     block_size: u32,
+    seed: u64,
+    is_restore: bool,
 ) {
     let num_blocks = indices.len();
+
+    let mut state_rng = ChaCha8Rng::seed_from_u64(seed);
+    let block_states: Vec<u8> = (0..num_blocks)
+        .map(|_| state_rng.random_range(0..8u8))
+        .collect();
 
     for block_idx in 0..num_blocks {
         let src_idx = block_idx;
@@ -112,8 +129,53 @@ fn rearrange_blocks(
         let dest_x = (dest_idx as u32 % cols) * block_size;
         let dest_y = (dest_idx as u32 / cols) * block_size;
 
-        let block = img.view(src_x, src_y, block_size, block_size).to_image();
+        // 提取块
+        let mut block = img.view(src_x, src_y, block_size, block_size).to_image();
+
+        // 获取该块对应的变换状态
+        let state = if !is_restore {
+            block_states[src_idx]
+        } else {
+            block_states[dest_idx]
+        };
+
+        apply_symmetry(&mut block, state, is_restore);
+
         out_img.copy_from(&block, dest_x, dest_y).unwrap();
+    }
+}
+
+/// 应用变换
+fn apply_symmetry(block: &mut RgbaImage, state: u8, is_restore: bool) {
+    match state {
+        1 => image::imageops::flip_horizontal_in_place(block),
+        2 => image::imageops::flip_vertical_in_place(block),
+        3 => {
+            image::imageops::flip_horizontal_in_place(block);
+            image::imageops::flip_vertical_in_place(block);
+        }
+        4 => {
+            if !is_restore {
+                *block = image::imageops::rotate90(block);
+            } else {
+                *block = image::imageops::rotate270(block);
+            }
+        }
+        5 => {
+            if !is_restore {
+                *block = image::imageops::rotate270(block);
+            } else {
+                *block = image::imageops::rotate90(block);
+            }
+        }
+        6 => {
+            *block = image::imageops::rotate180(block);
+            image::imageops::flip_horizontal_in_place(block);
+        }
+        7 => {
+            *block = image::imageops::rotate180(block);
+        }
+        _ => {} // 0: 不动
     }
 }
 
@@ -188,6 +250,101 @@ fn generate_morton_indices(cols: u32, rows: u32, seed: u64, is_restore: bool) ->
     final_indices
 }
 
+/// Gilbert曲线
+fn generate_gilbert_path(
+    x: i32,
+    y: i32,
+    ax: i32,
+    ay: i32,
+    bx: i32,
+    by: i32,
+    cols: u32,
+    path: &mut Vec<usize>,
+) {
+    let w = (ax + ay).abs();
+    let h = (bx + by).abs();
+    let dax = ax.signum();
+    let day = ay.signum();
+    let dbx = bx.signum();
+    let dby = by.signum();
+
+    if h == 1 {
+        for i in 0..w {
+            path.push(((y + i * day) as u32 * cols + (x + i * dax) as u32) as usize);
+        }
+        return;
+    }
+
+    if w == 1 {
+        for i in 0..h {
+            path.push(((y + i * dby) as u32 * cols + (x + i * dbx) as u32) as usize);
+        }
+        return;
+    }
+
+    let mut ax2 = ax / 2;
+    let mut ay2 = ay / 2;
+    let mut bx2 = bx / 2;
+    let mut by2 = by / 2;
+
+    let w2 = (ax2 + ay2).abs();
+    let h2 = (bx2 + by2).abs();
+
+    if 2 * w > 3 * h {
+        if (w2 % 2 != 0) && (w > 2) {
+            ax2 += dax;
+            ay2 += day;
+        }
+        generate_gilbert_path(x, y, ax2, ay2, bx, by, cols, path);
+        generate_gilbert_path(x + ax2, y + ay2, ax - ax2, ay - ay2, bx, by, cols, path);
+    } else {
+        if (h2 % 2 != 0) && (h > 2) {
+            bx2 += dbx;
+            by2 += dby;
+        }
+        generate_gilbert_path(x, y, bx2, by2, ax2, ay2, cols, path);
+        generate_gilbert_path(x + bx2, y + by2, ax, ay, bx - bx2, by - by2, cols, path);
+        generate_gilbert_path(
+            x + (ax - dax) + (bx2 - dbx),
+            y + (ay - day) + (by2 - dby),
+            -bx2,
+            -by2,
+            -(ax - ax2),
+            -(ay - ay2),
+            cols,
+            path,
+        );
+    }
+}
+
+// Gilbert索引生成
+fn generate_gilbert_indices(cols: u32, rows: u32, seed: u64, is_restore: bool) -> Vec<usize> {
+    let mut path = Vec::with_capacity((cols * rows) as usize);
+
+    // 初始化Gilbert递归
+    if cols >= rows {
+        generate_gilbert_path(0, 0, cols as i32, 0, 0, rows as i32, cols, &mut path);
+    } else {
+        generate_gilbert_path(0, 0, 0, rows as i32, cols as i32, 0, cols, &mut path);
+    }
+
+    let num_blocks = path.len();
+    let shift = (seed % num_blocks as u64) as usize;
+
+    let mut sorted_indices = path.clone();
+    if !is_restore {
+        sorted_indices.rotate_left(shift);
+    } else {
+        sorted_indices.rotate_right(shift);
+    }
+
+    let mut final_indices = vec![0; num_blocks];
+    for i in 0..num_blocks {
+        final_indices[path[i]] = sorted_indices[i];
+    }
+    final_indices
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -218,10 +375,21 @@ fn main() {
     out_img.copy_from(&img, 0, 0).unwrap();
 
     // 生成图像块重排索引
-    let indices = generate_morton_indices(cols, rows, seed, is_restore_mode);
+    let indices = match args.curve {
+        Curve::Morton => generate_morton_indices(cols, rows, seed, is_restore_mode),
+        Curve::Gilbert => generate_gilbert_indices(cols, rows, seed, is_restore_mode),
+    };
 
     // 重新排列图像块
-    rearrange_blocks(&img, &mut out_img, &indices, cols, BLOCK_SIZE);
+    rearrange_blocks(
+        &img,
+        &mut out_img,
+        &indices,
+        cols,
+        BLOCK_SIZE,
+        seed,
+        is_restore_mode,
+    );
 
     // 生成输出路径并保存
     let output_path = generate_output_path(&args, is_restore_mode);
