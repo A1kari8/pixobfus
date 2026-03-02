@@ -1,0 +1,16 @@
+[package]
+name = "pixobfus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+image = "0.25.9"
+rand = "0.10.0"
+rand_chacha = "0.10.0"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
