@@ -19,8 +19,8 @@ struct Args {
     #[arg(short, long)]
     key: Option<String>,
 
-    #[arg(short, long, default_value_t = 8)]
-    block: u32,
+    #[arg(short, long)]
+    block: Option<u32>,
 
     #[arg(short, long)]
     output: Option<String>,
@@ -219,7 +219,7 @@ fn process_edges(
 }
 
 /// 保存输出文件
-fn save_output(out_img: &RgbaImage, output_path: &str, is_scrambled: bool, seed: u64) {
+fn save_output(out_img: &RgbaImage, output_path: &str, is_scrambled: bool) {
     let mut buffer = Cursor::new(Vec::new());
     out_img.write_to(&mut buffer, ImageFormat::Png).unwrap();
     let mut final_data = buffer.into_inner();
@@ -247,9 +247,12 @@ fn generate_output_path(args: &Args, is_scrambled: bool) -> String {
     })
 }
 
+fn get_block_size(seed: u64) -> u32 {
+    (seed % 29 + 4) as u32 // 4-32之间的块大小
+}
+
 fn main() {
     let args = Args::parse();
-    let block_size = args.block;
 
     // 读取输入文件
     let file_bytes = fs::read(&args.input).unwrap_or_else(|e| {
@@ -263,6 +266,7 @@ fn main() {
 
     // 处理密钥
     let seed = handle_key(&args, is_scrambled);
+    let block_size = args.block.unwrap_or_else(|| get_block_size(seed));
 
     // 加载图像
     let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
@@ -299,5 +303,5 @@ fn main() {
 
     // 生成输出路径并保存
     let output_path = generate_output_path(&args, is_scrambled);
-    save_output(&out_img, &output_path, is_scrambled, seed);
+    save_output(&out_img, &output_path, is_scrambled);
 }
