@@ -72,10 +72,10 @@ fn generate_random_phrase() -> String {
 }
 
 fn check_signature(data: &[u8]) -> bool {
-    if data.len() < SIGNATURE.len() + 4 {
+    if data.len() < SIGNATURE.len() {
         return false;
     }
-    let sig_pos = data.len() - SIGNATURE.len() - 4;
+    let sig_pos = data.len() - SIGNATURE.len();
     &data[sig_pos..sig_pos + SIGNATURE.len()] == SIGNATURE
 }
 
@@ -108,17 +108,6 @@ fn handle_key(args: &Args, is_scrambled: bool) -> u64 {
                 derive_seed(&phrase)
             }
         }
-    }
-}
-
-/// 验证密钥是否正确
-fn verify_key(file_bytes: &[u8], seed: u64) {
-    let expected_check = &file_bytes[file_bytes.len() - 4..];
-    let actual_check = &seed.to_le_bytes()[0..4];
-
-    if expected_check != actual_check {
-        eprintln!("Error: Invalid Key! The pixels will not be restored correctly.");
-        exit(1);
     }
 }
 
@@ -237,7 +226,6 @@ fn save_output(out_img: &RgbaImage, output_path: &str, is_scrambled: bool, seed:
 
     if !is_scrambled {
         final_data.extend_from_slice(SIGNATURE);
-        final_data.extend_from_slice(&seed.to_le_bytes()[0..4]);
     }
 
     fs::write(output_path, final_data).unwrap_or_else(|e| {
@@ -275,11 +263,6 @@ fn main() {
 
     // 处理密钥
     let seed = handle_key(&args, is_scrambled);
-
-    // 如果是还原模式，验证密钥
-    if is_scrambled {
-        verify_key(&file_bytes, seed);
-    }
 
     // 加载图像
     let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
