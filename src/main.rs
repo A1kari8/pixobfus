@@ -69,10 +69,6 @@ fn determine_mode(args: &Args, has_signature: bool) -> bool {
     if args.obfuscate {
         false // 混淆
     } else if args.restore {
-        if !has_signature {
-            eprintln!("Error: Input file does not have the expected signature for restoration.");
-            exit(1);
-        }
         true // 还原
     } else {
         has_signature // 默认自动识别
