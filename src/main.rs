@@ -1,3 +1,4 @@
+use bip39::Mnemonic;
 use clap::Parser;
 use image::{GenericImage, GenericImageView, ImageFormat, RgbaImage};
 use rand::seq::{IndexedRandom, SliceRandom};
@@ -25,12 +26,10 @@ struct Args {
     #[arg(short, long)]
     output: Option<String>,
 
-    /// 执行混淆
     #[arg(short, long, conflicts_with = "restore")]
-    scramble: bool,
+    obfuscate: bool,
 
-    /// 执行还原
-    #[arg(short, long, conflicts_with = "scramble")]
+    #[arg(short, long, conflicts_with = "obfuscate")]
     restore: bool,
 }
 
@@ -47,28 +46,14 @@ fn derive_seed(key: &str) -> u64 {
 }
 
 fn generate_random_phrase() -> String {
-    let adjs = [
-        "ancient", "broken", "clever", "distant", "emerald", "flying", "giant", "hidden", "iron",
-        "jolly", "kind", "lucky", "mystic", "neon", "odd", "pure", "quiet", "rapid", "silver",
-        "tiny", "ultra", "vivid", "wild", "young",
-    ];
-    let colors = [
-        "red", "blue", "green", "yellow", "purple", "orange", "pink", "brown", "black", "white",
-        "cyan", "magenta", "gold", "silver", "amber", "teal",
-    ];
-    let nouns = [
-        "tiger", "forest", "mountain", "nebula", "river", "phoenix", "shadow", "storm", "rabbit",
-        "ocean", "star", "wolf", "eagle", "dragon", "hammer", "cloud", "knight", "wizard",
-        "castle", "bridge", "spirit", "comet", "stone", "flame",
-    ];
-
     let mut rng = rand::rng();
-    let adj = adjs.choose(&mut rng).unwrap();
-    let color = colors.choose(&mut rng).unwrap();
-    let noun = nouns.choose(&mut rng).unwrap();
-    let num: u16 = rng.random_range(100..999);
-
-    format!("{}-{}-{}-{}", adj, color, noun, num)
+    let entropy = (0..16).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
+    let mnemonic = Mnemonic::from_entropy(&entropy).expect("Failed to generate mnemonic");
+    // 拆分成单词列表
+    let words: Vec<&str> = mnemonic.words().collect();
+    // 随机选6个不同的词
+    let selected: Vec<&str> = words.sample(&mut rng, 6).cloned().collect();
+    selected.join("-")
 }
 
 fn check_signature(data: &[u8]) -> bool {
@@ -81,7 +66,7 @@ fn check_signature(data: &[u8]) -> bool {
 
 /// 确定模式
 fn determine_mode(args: &Args, has_signature: bool) -> bool {
-    if args.scramble {
+    if args.obfuscate {
         false // 混淆
     } else if args.restore {
         if !has_signature {
