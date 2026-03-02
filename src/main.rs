@@ -141,10 +141,13 @@ fn main() {
         exit(1);
     }
 
-    let mut indices: Vec<usize> = (0..(cols * rows) as usize).collect();
+    let num_blocks = (cols * rows) as usize;
+    let mut out_img = RgbaImage::new(width, height);
+    out_img.copy_from(&img, 0, 0).unwrap();
+
     let mut shuffle_rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut indices: Vec<usize> = (0..num_blocks as usize).collect();
     indices.shuffle(&mut shuffle_rng);
-    let num_blocks = indices.len();
 
     let mut color_rng = ChaCha8Rng::seed_from_u64(seed);
     let mut all_masks = Vec::with_capacity(num_blocks);
@@ -160,7 +163,6 @@ fn main() {
         all_masks.push(block_mask);
     }
 
-    let mut out_img = RgbaImage::new(cols * block_size, rows * block_size);
     for i in 0..num_blocks {
         let (src_idx, dest_idx) = if !is_scrambled {
             // 混淆：从原位置i取块，经过XOR后放到打乱后的位置indices[i]
@@ -174,6 +176,7 @@ fn main() {
         let src_y = (src_idx as u32 / cols) * block_size;
         let dest_x = (dest_idx as u32 % cols) * block_size;
         let dest_y = (dest_idx as u32 / cols) * block_size;
+
         let mut part = img.view(src_x, src_y, block_size, block_size).to_image();
 
         // 对颜色进行异或
@@ -185,6 +188,22 @@ fn main() {
         }
 
         out_img.copy_from(&part, dest_x, dest_y).unwrap();
+    }
+
+    // 处理边缘
+    let mut edge_rng = ChaCha8Rng::seed_from_u64(seed + 1);
+
+    for y in 0..height {
+        for x in 0..width {
+            if x >= cols * block_size || y >= rows * block_size {
+                let pixel = out_img.get_pixel_mut(x, y);
+                let mask: u32 = edge_rng.random();
+                let m = mask.to_le_bytes();
+                pixel.0[0] ^= m[0];
+                pixel.0[1] ^= m[1];
+                pixel.0[2] ^= m[2];
+            }
+        }
     }
 
     let output_path = args.output.unwrap_or_else(|| {
