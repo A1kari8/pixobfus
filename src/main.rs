@@ -79,18 +79,9 @@ fn check_signature(data: &[u8]) -> bool {
     &data[sig_pos..sig_pos + SIGNATURE.len()] == SIGNATURE
 }
 
-fn main() {
-    let args = Args::parse();
-    let block_size = args.block;
-
-    let file_bytes = fs::read(&args.input).unwrap_or_else(|e| {
-        eprintln!("Error reading input: {}", e);
-        exit(1);
-    });
-
-    let has_signature = check_signature(&file_bytes);
-
-    let is_scrambled = if args.scramble {
+/// 确定模式
+fn determine_mode(args: &Args, has_signature: bool) -> bool {
+    if args.scramble {
         false // 混淆
     } else if args.restore {
         if !has_signature {
@@ -100,57 +91,63 @@ fn main() {
         true // 还原
     } else {
         has_signature // 默认自动识别
-    };
+    }
+}
 
-    let seed = match args.key {
+/// 处理密钥逻辑
+fn handle_key(args: &Args, is_scrambled: bool) -> u64 {
+    match args.key {
         Some(ref k) => k.parse::<u64>().unwrap_or_else(|_| derive_seed(k)),
         None => {
             if is_scrambled {
                 eprintln!("Error: Key (-k) is required for de-obfuscation.");
                 exit(1);
             } else {
-                // 生成短语密钥
                 let phrase = generate_random_phrase();
                 println!("Generated secret key: {}", phrase);
                 derive_seed(&phrase)
             }
         }
-    };
-
-    if is_scrambled {
-        // 签名13字节，校验位4字节
-        let expected_check = &file_bytes[file_bytes.len() - 4..];
-        let actual_check = &seed.to_le_bytes()[0..4];
-
-        if expected_check != actual_check {
-            eprintln!("Error: Invalid Key! The pixels will not be restored correctly.");
-            exit(1);
-        }
     }
+}
 
-    let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
-        eprintln!("Error decoding image: {}", e);
+/// 验证密钥是否正确
+fn verify_key(file_bytes: &[u8], seed: u64) {
+    let expected_check = &file_bytes[file_bytes.len() - 4..];
+    let actual_check = &seed.to_le_bytes()[0..4];
+
+    if expected_check != actual_check {
+        eprintln!("Error: Invalid Key! The pixels will not be restored correctly.");
         exit(1);
-    });
+    }
+}
 
-    let (width, height) = img.dimensions();
-    let (cols, rows) = (width / block_size, height / block_size);
+/// 验证块大小是否合理
+fn validate_dimensions(width: u32, height: u32, block_size: u32) -> (u32, u32) {
+    let cols = width / block_size;
+    let rows = height / block_size;
 
     if cols == 0 || rows == 0 {
         eprintln!("Error: Block size {} is too large.", block_size);
         exit(1);
     }
 
-    let num_blocks = (cols * rows) as usize;
-    let mut out_img = RgbaImage::new(width, height);
-    out_img.copy_from(&img, 0, 0).unwrap();
+    (cols, rows)
+}
 
+/// 生成打乱的索引序列
+fn generate_shuffle_indices(num_blocks: usize, seed: u64) -> Vec<usize> {
     let mut shuffle_rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut indices: Vec<usize> = (0..num_blocks as usize).collect();
+    let mut indices: Vec<usize> = (0..num_blocks).collect();
     indices.shuffle(&mut shuffle_rng);
+    indices
+}
 
+/// 生成颜色掩码
+fn generate_color_masks(num_blocks: usize, block_size: u32, seed: u64) -> Vec<Vec<u8>> {
     let mut color_rng = ChaCha8Rng::seed_from_u64(seed);
     let mut all_masks = Vec::with_capacity(num_blocks);
+
     for _ in 0..num_blocks {
         let mut block_mask = vec![0u8; (block_size * block_size * 3) as usize];
         for i in 0..(block_size * block_size) as usize {
@@ -162,6 +159,21 @@ fn main() {
         }
         all_masks.push(block_mask);
     }
+
+    all_masks
+}
+
+/// 处理图像块（混淆或还原）
+fn process_blocks(
+    img: &image::DynamicImage,
+    out_img: &mut RgbaImage,
+    indices: &[usize],
+    masks: &[Vec<u8>],
+    cols: u32,
+    block_size: u32,
+    is_scrambled: bool,
+) {
+    let num_blocks = indices.len();
 
     for i in 0..num_blocks {
         let (src_idx, dest_idx) = if !is_scrambled {
@@ -180,7 +192,7 @@ fn main() {
         let mut part = img.view(src_x, src_y, block_size, block_size).to_image();
 
         // 对颜色进行异或
-        let mask = &all_masks[i];
+        let mask = &masks[i];
         for (px_idx, pixel) in part.pixels_mut().enumerate() {
             pixel.0[0] ^= mask[px_idx * 3];
             pixel.0[1] ^= mask[px_idx * 3 + 1];
@@ -189,8 +201,18 @@ fn main() {
 
         out_img.copy_from(&part, dest_x, dest_y).unwrap();
     }
+}
 
-    // 处理边缘
+/// 处理边缘像素
+fn process_edges(
+    out_img: &mut RgbaImage,
+    width: u32,
+    height: u32,
+    cols: u32,
+    rows: u32,
+    block_size: u32,
+    seed: u64,
+) {
     let mut edge_rng = ChaCha8Rng::seed_from_u64(seed + 1);
 
     for y in 0..height {
@@ -205,17 +227,10 @@ fn main() {
             }
         }
     }
+}
 
-    let output_path = args.output.unwrap_or_else(|| {
-        let path = Path::new(&args.input);
-        let stem = path.file_stem().unwrap().to_str().unwrap();
-        if !is_scrambled {
-            format!("{}_obfus.png", stem)
-        } else {
-            format!("{}_res.png", stem)
-        }
-    });
-
+/// 保存输出文件
+fn save_output(out_img: &RgbaImage, output_path: &str, is_scrambled: bool, seed: u64) {
     let mut buffer = Cursor::new(Vec::new());
     out_img.write_to(&mut buffer, ImageFormat::Png).unwrap();
     let mut final_data = buffer.into_inner();
@@ -225,8 +240,81 @@ fn main() {
         final_data.extend_from_slice(&seed.to_le_bytes()[0..4]);
     }
 
-    fs::write(&output_path, final_data).unwrap_or_else(|e| {
+    fs::write(output_path, final_data).unwrap_or_else(|e| {
         eprintln!("Error writing file: {}", e);
         exit(1);
     });
+}
+
+/// 生成输出文件路径
+fn generate_output_path(args: &Args, is_scrambled: bool) -> String {
+    args.output.clone().unwrap_or_else(|| {
+        let path = Path::new(&args.input);
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        if !is_scrambled {
+            format!("{}_obfus.png", stem)
+        } else {
+            format!("{}_res.png", stem)
+        }
+    })
+}
+
+fn main() {
+    let args = Args::parse();
+    let block_size = args.block;
+
+    // 读取输入文件
+    let file_bytes = fs::read(&args.input).unwrap_or_else(|e| {
+        eprintln!("Error reading input: {}", e);
+        exit(1);
+    });
+
+    // 检查签名并确定模式
+    let has_signature = check_signature(&file_bytes);
+    let is_scrambled = determine_mode(&args, has_signature);
+
+    // 处理密钥
+    let seed = handle_key(&args, is_scrambled);
+
+    // 如果是还原模式，验证密钥
+    if is_scrambled {
+        verify_key(&file_bytes, seed);
+    }
+
+    // 加载图像
+    let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
+        eprintln!("Error decoding image: {}", e);
+        exit(1);
+    });
+
+    // 验证图像尺寸和块大小
+    let (width, height) = img.dimensions();
+    let (cols, rows) = validate_dimensions(width, height, block_size);
+
+    // 初始化输出图像
+    let num_blocks = (cols * rows) as usize;
+    let mut out_img = RgbaImage::new(width, height);
+    out_img.copy_from(&img, 0, 0).unwrap();
+
+    // 生成打乱索引和颜色掩码
+    let indices = generate_shuffle_indices(num_blocks, seed);
+    let masks = generate_color_masks(num_blocks, block_size, seed);
+
+    // 处理图像块
+    process_blocks(
+        &img,
+        &mut out_img,
+        &indices,
+        &masks,
+        cols,
+        block_size,
+        is_scrambled,
+    );
+
+    // 处理边缘像素
+    process_edges(&mut out_img, width, height, cols, rows, block_size, seed);
+
+    // 生成输出路径并保存
+    let output_path = generate_output_path(&args, is_scrambled);
+    save_output(&out_img, &output_path, is_scrambled, seed);
 }
