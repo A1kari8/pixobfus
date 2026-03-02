@@ -19,23 +19,36 @@ enum Curve {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author, version, about,
+    group(
+        clap::ArgGroup::new("mode")
+            .required(true)
+            .args(&["obfuscate", "restore"]),
+    )
+)]
 struct Args {
+    /// Obfuscate the image
     #[arg(short = 'O', long, conflicts_with = "restore")]
     obfuscate: bool,
-
+    /// Restore the image
     #[arg(short = 'R', long, conflicts_with = "obfuscate")]
     restore: bool,
 
-    #[arg(short = 'k', long)]
+    /// Secret key for obfuscation/restoration (can be a string or a number).
+    /// - obfuscate: If not provided, a random key will be generated and displayed.
+    /// - restore: Required to reverse the obfuscation.
+    #[arg(short = 'k', long, value_name = "KEY", verbatim_doc_comment)]
     key: Option<String>,
 
+    /// Curve type for block rearrangement
     #[arg(short = 'c', long, value_enum, default_value = "gilbert")]
     curve: Curve,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
 
+    /// Input image file path
     input: String,
 }
 
@@ -59,18 +72,6 @@ fn generate_random_phrase() -> String {
     // 随机选6个不同的词
     let selected: Vec<&str> = words.sample(&mut rng, 6).cloned().collect();
     selected.join("-")
-}
-
-/// 确定模式
-fn determine_mode(args: &Args) -> bool {
-    if args.obfuscate {
-        false // 混淆
-    } else if args.restore {
-        true // 还原
-    } else {
-        eprintln!("Error: Must specify either --obfuscate (-O) or --restore (-R) mode.");
-        exit(1);
-    }
 }
 
 /// 处理密钥逻辑
@@ -355,7 +356,7 @@ fn main() {
     });
 
     // 确定操作模式
-    let is_restore_mode = determine_mode(&args);
+    let is_restore_mode = args.restore;
 
     // 处理密钥
     let seed = handle_key(&args, is_restore_mode);
