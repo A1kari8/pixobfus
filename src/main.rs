@@ -149,32 +149,47 @@ fn rearrange_blocks(
 /// 应用变换
 fn apply_symmetry(block: &mut RgbaImage, state: u8, is_restore: bool) {
     match state {
-        1 => image::imageops::flip_horizontal_in_place(block),
-        2 => image::imageops::flip_vertical_in_place(block),
+        // 旋转
+        1 => {
+            if !is_restore {
+                *block = image::imageops::rotate90(block);
+            } else {
+                *block = image::imageops::rotate270(block);
+            }
+        }
+        2 => *block = image::imageops::rotate180(block),
         3 => {
-            image::imageops::flip_horizontal_in_place(block);
-            image::imageops::flip_vertical_in_place(block);
-        }
-        4 => {
-            if !is_restore {
-                *block = image::imageops::rotate90(block);
-            } else {
-                *block = image::imageops::rotate270(block);
-            }
-        }
-        5 => {
             if !is_restore {
                 *block = image::imageops::rotate270(block);
             } else {
                 *block = image::imageops::rotate90(block);
             }
         }
+
+        // 翻转
+        4 => image::imageops::flip_horizontal_in_place(block),
+        5 => image::imageops::flip_vertical_in_place(block),
+
+        // 对角线翻转
         6 => {
-            *block = image::imageops::rotate180(block);
-            image::imageops::flip_horizontal_in_place(block);
+            if !is_restore {
+                *block = image::imageops::rotate90(block);
+                image::imageops::flip_horizontal_in_place(block);
+            } else {
+                image::imageops::flip_horizontal_in_place(block);
+                *block = image::imageops::rotate270(block);
+            }
         }
         7 => {
-            *block = image::imageops::rotate180(block);
+            if !is_restore {
+                // 混淆先转后翻
+                *block = image::imageops::rotate90(block);
+                image::imageops::flip_vertical_in_place(block);
+            } else {
+                // 还原先翻后转
+                image::imageops::flip_vertical_in_place(block);
+                *block = image::imageops::rotate270(block);
+            }
         }
         _ => {} // 0: 不动
     }
@@ -261,6 +276,7 @@ fn generate_gilbert_path(
     by: i32,
     cols: u32,
     path: &mut Vec<usize>,
+    rng: &mut ChaCha8Rng,
 ) {
     let w = (ax + ay).abs();
     let h = (bx + by).abs();
@@ -291,20 +307,48 @@ fn generate_gilbert_path(
     let w2 = (ax2 + ay2).abs();
     let h2 = (bx2 + by2).abs();
 
-    if 2 * w > 3 * h {
+    let mut do_split_w = 2 * w > 3 * h;
+
+    // 长宽比接近正方形时随机决定切割方向
+    let aspect_ratio = w as f32 / h as f32;
+    if aspect_ratio > 0.75 && aspect_ratio < 1.5 {
+        do_split_w = rng.random_bool(0.5);
+    }
+
+    if do_split_w {
         if (w2 % 2 != 0) && (w > 2) {
             ax2 += dax;
             ay2 += day;
         }
-        generate_gilbert_path(x, y, ax2, ay2, bx, by, cols, path);
-        generate_gilbert_path(x + ax2, y + ay2, ax - ax2, ay - ay2, bx, by, cols, path);
+        generate_gilbert_path(x, y, ax2, ay2, bx, by, cols, path, rng);
+        generate_gilbert_path(
+            x + ax2,
+            y + ay2,
+            ax - ax2,
+            ay - ay2,
+            bx,
+            by,
+            cols,
+            path,
+            rng,
+        );
     } else {
         if (h2 % 2 != 0) && (h > 2) {
             bx2 += dbx;
             by2 += dby;
         }
-        generate_gilbert_path(x, y, bx2, by2, ax2, ay2, cols, path);
-        generate_gilbert_path(x + bx2, y + by2, ax, ay, bx - bx2, by - by2, cols, path);
+        generate_gilbert_path(x, y, bx2, by2, ax2, ay2, cols, path, rng);
+        generate_gilbert_path(
+            x + bx2,
+            y + by2,
+            ax,
+            ay,
+            bx - bx2,
+            by - by2,
+            cols,
+            path,
+            rng,
+        );
         generate_gilbert_path(
             x + (ax - dax) + (bx2 - dbx),
             y + (ay - day) + (by2 - dby),
@@ -314,6 +358,7 @@ fn generate_gilbert_path(
             -(ay - ay2),
             cols,
             path,
+            rng,
         );
     }
 }
@@ -322,11 +367,32 @@ fn generate_gilbert_path(
 fn generate_gilbert_indices(cols: u32, rows: u32, seed: u64, is_restore: bool) -> Vec<usize> {
     let mut path = Vec::with_capacity((cols * rows) as usize);
 
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     // 初始化Gilbert递归
     if cols >= rows {
-        generate_gilbert_path(0, 0, cols as i32, 0, 0, rows as i32, cols, &mut path);
+        generate_gilbert_path(
+            0,
+            0,
+            cols as i32,
+            0,
+            0,
+            rows as i32,
+            cols,
+            &mut path,
+            &mut rng,
+        );
     } else {
-        generate_gilbert_path(0, 0, 0, rows as i32, cols as i32, 0, cols, &mut path);
+        generate_gilbert_path(
+            0,
+            0,
+            0,
+            rows as i32,
+            cols as i32,
+            0,
+            cols,
+            &mut path,
+            &mut rng,
+        );
     }
 
     let num_blocks = path.len();
