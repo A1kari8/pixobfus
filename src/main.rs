@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::process::exit;
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, Copy)]
 enum Curve {
     Morton,
     Gilbert,
@@ -51,6 +51,7 @@ struct Args {
     #[arg(short = 'c', long, value_enum, default_value = "gilbert")]
     curve: Curve,
 
+    #[cfg(feature = "visualize")]
     #[arg(short = 'v', long, default_value_t = false)]
     visualize: bool,
 
@@ -58,7 +59,8 @@ struct Args {
     output: Option<String>,
 
     /// Input image file path
-    input: String,
+    #[arg(required = true, num_args = 1..)]
+    input: Vec<String>,
 }
 
 /// 处理密钥逻辑
@@ -71,7 +73,7 @@ fn handle_key(args: &Args, is_restore_mode: bool) -> u64 {
                 exit(1);
             } else {
                 let phrase = generate_random_phrase();
-                println!("Generated secret key: {}", phrase);
+                println!("{}", phrase);
                 derive_seed(&phrase)
             }
         }
@@ -91,17 +93,34 @@ fn save_output(out_img: &RgbaImage, output_path: &str, format: ImageFormat) {
 }
 
 /// 生成输出文件路径
-fn generate_output_path(args: &Args, is_restore_mode: bool, format: ImageFormat) -> String {
-    args.output.clone().unwrap_or_else(|| {
-        let path = Path::new(&args.input);
+fn generate_output_path(
+    input: &str,
+    output: Option<String>,
+    is_restore_mode: bool,
+    format: ImageFormat,
+    output_dir: Option<&str>,
+) -> String {
+    if let Some(output_path) = output {
+        // 如果明确指定了output（单文件模式）
+        output_path
+    } else {
+        let path = Path::new(input);
         let stem = path.file_stem().unwrap().to_str().unwrap();
         let extension = format_to_extension(format);
-        if !is_restore_mode {
+        let filename = if !is_restore_mode {
             format!("{}_obfus.{}", stem, extension)
         } else {
             format!("{}_res.{}", stem, extension)
+        };
+
+        if let Some(dir) = output_dir {
+            // 如果有输出目录，将文件名放在该目录下
+            Path::new(dir).join(filename).to_str().unwrap().to_string()
+        } else {
+            // 否则在当前目录
+            filename
         }
-    })
+    }
 }
 
 #[cfg(feature = "visualize")]
@@ -141,51 +160,45 @@ fn generate_visual_path(width: u32, height: u32, indices: &[usize], block_size: 
     canvas
 }
 
-fn main() {
-    let args = Args::parse();
-
+fn process_single_file(
+    input: &str,
+    output: Option<String>,
+    seed: u64,
+    curve: LibCurve,
+    is_restore_mode: bool,
+    output_dir: Option<&str>,
+) -> Result<(), String> {
     // 读取输入文件
-    let file_bytes = fs::read(&args.input).unwrap_or_else(|e| {
-        eprintln!("Error reading input: {}", e);
-        exit(1);
-    });
-
-    // 确定操作模式
-    let is_restore_mode = args.restore;
-
-    // 处理密钥
-    let seed = handle_key(&args, is_restore_mode);
+    let file_bytes =
+        fs::read(input).map_err(|e| format!("Error reading input '{}': {}", input, e))?;
 
     // 检测并加载图像
-    let img_format = image::guess_format(&file_bytes).unwrap_or_else(|e| {
-        eprintln!("Error detecting image format: {}", e);
-        exit(1);
-    });
+    let img_format = image::guess_format(&file_bytes)
+        .map_err(|e| format!("Error detecting image format for '{}': {}", input, e))?;
 
     // 验证格式是否支持
     if !validate_format(img_format) {
-        eprintln!("Error: Unsupported image format. Only PNG, JPEG, and WebP are supported.");
-        exit(1);
+        return Err(format!(
+            "Unsupported image format for '{}'. Only PNG, JPEG, and WebP are supported.",
+            input
+        ));
     }
 
-    let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
-        eprintln!("Error decoding image: {}", e);
-        exit(1);
-    });
+    let img = image::load_from_memory(&file_bytes)
+        .map_err(|e| format!("Error decoding image '{}': {}", input, e))?;
 
     // 验证图像尺寸和块大小
     let (width, height) = img.dimensions();
     if validate_dimensions(width, height, BLOCK_SIZE).is_none() {
-        eprintln!("Error: Image size too small for block size {}.", BLOCK_SIZE);
-        exit(1);
+        return Err(format!(
+            "Image '{}' size too small for block size {}.",
+            input, BLOCK_SIZE
+        ));
     }
 
     // 处理图像
-    let out_img = process_image(&img, seed, args.curve.clone().into(), is_restore_mode)
-        .unwrap_or_else(|e| {
-            eprintln!("Error processing image: {}", e);
-            exit(1);
-        });
+    let out_img = process_image(&img, seed, curve, is_restore_mode)
+        .map_err(|e| format!("Error processing image '{}': {}", input, e))?;
 
     #[cfg(feature = "visualize")]
     if args.visualize {
@@ -199,10 +212,73 @@ fn main() {
             .save("debug_path.png")
             .expect("Failed to save debug image");
         println!("Successfully generated path visualization to debug_path.png");
-        return;
+        return Ok(());
     }
 
-    // 生成输出路径并保存
-    let output_path = generate_output_path(&args, is_restore_mode, img_format);
+    let output_path = generate_output_path(input, output, is_restore_mode, img_format, output_dir);
     save_output(&out_img, &output_path, img_format);
+
+    Ok(())
+}
+
+fn main() {
+    let args = Args::parse_from(wild::args());
+
+    // 确定操作模式
+    let is_restore_mode = args.restore;
+
+    // 处理密钥
+    let seed = handle_key(&args, is_restore_mode);
+
+    // 判断是否应该将output作为目录
+    let output_dir = if args.input.len() > 1 && args.output.is_some() {
+        let dir = args.output.as_ref().unwrap();
+        fs::create_dir_all(dir).unwrap_or_else(|e| {
+            eprintln!("Error creating output directory: {}", e);
+            exit(1);
+        });
+        Some(dir.as_str())
+    } else {
+        None
+    };
+
+    // 统计处理结果
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for input in &args.input {
+        let output = if output_dir.is_some() {
+            None
+        } else {
+            args.output.clone()
+        };
+
+        match process_single_file(
+            input,
+            output,
+            seed,
+            args.curve.into(),
+            is_restore_mode,
+            output_dir,
+        ) {
+            Ok(_) => {
+                success_count += 1;
+            }
+            Err(e) => {
+                fail_count += 1;
+                eprintln!("Failed: {}", e);
+            }
+        }
+    }
+
+    if args.input.len() > 1 {
+        eprintln!(
+            "\nProcessing completed: {} succeeded, {} failed",
+            success_count, fail_count
+        );
+    }
+
+    if fail_count > 0 && success_count == 0 {
+        exit(1);
+    }
 }
