@@ -34,7 +34,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true

@@ -1,8 +1,8 @@
 use clap::{Parser, ValueEnum};
 use image::{GenericImageView, ImageFormat, RgbaImage};
 use pixobfus::{
-    BLOCK_SIZE, Curve as LibCurve, derive_seed, generate_random_phrase, process_image,
-    validate_dimensions,
+    BLOCK_SIZE, Curve as LibCurve, derive_seed, format_to_extension, generate_random_phrase,
+    process_image, validate_dimensions, validate_format,
 };
 use std::fs;
 use std::io::Cursor;
@@ -79,9 +79,9 @@ fn handle_key(args: &Args, is_restore_mode: bool) -> u64 {
 }
 
 /// 保存输出文件
-fn save_output(out_img: &RgbaImage, output_path: &str) {
+fn save_output(out_img: &RgbaImage, output_path: &str, format: ImageFormat) {
     let mut buffer = Cursor::new(Vec::new());
-    out_img.write_to(&mut buffer, ImageFormat::Png).unwrap();
+    out_img.write_to(&mut buffer, format).unwrap();
     let final_data = buffer.into_inner();
 
     fs::write(output_path, final_data).unwrap_or_else(|e| {
@@ -91,14 +91,15 @@ fn save_output(out_img: &RgbaImage, output_path: &str) {
 }
 
 /// 生成输出文件路径
-fn generate_output_path(args: &Args, is_restore_mode: bool) -> String {
+fn generate_output_path(args: &Args, is_restore_mode: bool, format: ImageFormat) -> String {
     args.output.clone().unwrap_or_else(|| {
         let path = Path::new(&args.input);
         let stem = path.file_stem().unwrap().to_str().unwrap();
+        let extension = format_to_extension(format);
         if !is_restore_mode {
-            format!("{}_obfus.png", stem)
+            format!("{}_obfus.{}", stem, extension)
         } else {
-            format!("{}_res.png", stem)
+            format!("{}_res.{}", stem, extension)
         }
     })
 }
@@ -155,7 +156,18 @@ fn main() {
     // 处理密钥
     let seed = handle_key(&args, is_restore_mode);
 
-    // 加载图像
+    // 检测并加载图像
+    let img_format = image::guess_format(&file_bytes).unwrap_or_else(|e| {
+        eprintln!("Error detecting image format: {}", e);
+        exit(1);
+    });
+
+    // 验证格式是否支持
+    if !validate_format(img_format) {
+        eprintln!("Error: Unsupported image format. Only PNG, JPEG, and WebP are supported.");
+        exit(1);
+    }
+
     let img = image::load_from_memory(&file_bytes).unwrap_or_else(|e| {
         eprintln!("Error decoding image: {}", e);
         exit(1);
@@ -191,6 +203,6 @@ fn main() {
     }
 
     // 生成输出路径并保存
-    let output_path = generate_output_path(&args, is_restore_mode);
-    save_output(&out_img, &output_path);
+    let output_path = generate_output_path(&args, is_restore_mode, img_format);
+    save_output(&out_img, &output_path, img_format);
 }

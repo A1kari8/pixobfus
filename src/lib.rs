@@ -15,6 +15,23 @@ pub enum Curve {
     Gilbert,
 }
 
+pub fn validate_format(format: image::ImageFormat) -> bool {
+    matches!(
+        format,
+        image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP
+    )
+}
+
+/// 获取格式对应扩展名
+pub fn format_to_extension(format: image::ImageFormat) -> &'static str {
+    match format {
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::WebP => "webp",
+        _ => unreachable!("Unsupported format should be caught earlier"),
+    }
+}
+
 /// 将字符串转为u64种子
 pub fn derive_seed(key: &str) -> u64 {
     let mut hasher = Sha256::new();
@@ -409,7 +426,6 @@ pub fn get_raw_gilbert_path(cols: u32, rows: u32, seed: u64) -> Vec<usize> {
 #[cfg(target_arch = "wasm32")]
 pub mod wasm {
     use super::*;
-    use image::ImageFormat;
     use std::io::Cursor;
 
     #[wasm_bindgen]
@@ -418,6 +434,15 @@ pub mod wasm {
         key: &str,
         use_gilbert: bool,
     ) -> Result<Vec<u8>, JsValue> {
+        let img_format = image::guess_format(image_data)
+            .map_err(|e| JsValue::from_str(&format!("Failed to detect image format: {}", e)))?;
+
+        if !validate_format(img_format) {
+            return Err(JsValue::from_str(
+                "Unsupported image format. Only PNG, JPEG, and WebP are supported.",
+            ));
+        };
+
         let img = image::load_from_memory(image_data)
             .map_err(|e| JsValue::from_str(&format!("Failed to load image: {}", e)))?;
 
@@ -432,7 +457,7 @@ pub mod wasm {
 
         let mut buffer = Cursor::new(Vec::new());
         out_img
-            .write_to(&mut buffer, ImageFormat::Png)
+            .write_to(&mut buffer, img_format)
             .map_err(|e| JsValue::from_str(&format!("Failed to encode image: {}", e)))?;
 
         Ok(buffer.into_inner())
@@ -444,6 +469,15 @@ pub mod wasm {
         key: &str,
         use_gilbert: bool,
     ) -> Result<Vec<u8>, JsValue> {
+        let img_format = image::guess_format(image_data)
+            .map_err(|e| JsValue::from_str(&format!("Failed to detect image format: {}", e)))?;
+
+        if !validate_format(img_format) {
+            return Err(JsValue::from_str(
+                "Unsupported image format. Only PNG, JPEG, and WebP are supported.",
+            ));
+        };
+
         let img = image::load_from_memory(image_data)
             .map_err(|e| JsValue::from_str(&format!("Failed to load image: {}", e)))?;
 
@@ -458,15 +492,10 @@ pub mod wasm {
 
         let mut buffer = Cursor::new(Vec::new());
         out_img
-            .write_to(&mut buffer, ImageFormat::Png)
+            .write_to(&mut buffer, img_format)
             .map_err(|e| JsValue::from_str(&format!("Failed to encode image: {}", e)))?;
 
         Ok(buffer.into_inner())
-    }
-
-    #[wasm_bindgen]
-    pub fn get_seed_from_key(key: &str) -> String {
-        derive_seed(key).to_string()
     }
 
     #[wasm_bindgen]
