@@ -371,6 +371,40 @@ pub fn process_image(
     Ok(out_img)
 }
 
+#[cfg(feature = "visualize")]
+pub fn get_raw_gilbert_path(cols: u32, rows: u32, seed: u64) -> Vec<usize> {
+    let mut path = Vec::with_capacity((cols * rows) as usize);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    // 初始化Gilbert递归
+    if cols >= rows {
+        generate_gilbert_path(
+            0,
+            0,
+            cols as i32,
+            0,
+            0,
+            rows as i32,
+            cols,
+            &mut path,
+            &mut rng,
+        );
+    } else {
+        generate_gilbert_path(
+            0,
+            0,
+            0,
+            rows as i32,
+            cols as i32,
+            0,
+            cols,
+            &mut path,
+            &mut rng,
+        );
+    }
+
+    path
+}
+
 /// WASM接口
 #[cfg(target_arch = "wasm32")]
 pub mod wasm {

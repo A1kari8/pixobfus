@@ -51,6 +51,9 @@ struct Args {
     #[arg(short = 'c', long, value_enum, default_value = "gilbert")]
     curve: Curve,
 
+    #[arg(short = 'v', long, default_value_t = false)]
+    visualize: bool,
+
     #[arg(short = 'o', long)]
     output: Option<String>,
 
@@ -100,6 +103,43 @@ fn generate_output_path(args: &Args, is_restore_mode: bool) -> String {
     })
 }
 
+#[cfg(feature = "visualize")]
+fn generate_visual_path(width: u32, height: u32, indices: &[usize], block_size: u32) -> RgbaImage {
+    use image::Rgba;
+    use imageproc::drawing::draw_line_segment_mut;
+
+    let mut canvas = RgbaImage::new(width, height);
+    for pixel in canvas.pixels_mut() {
+        *pixel = Rgba([30, 30, 30, 255]);
+    }
+
+    let cols = width / block_size;
+    let line_color = Rgba([0, 255, 255, 255]);
+
+    for i in 0..(indices.len() - 1) {
+        let s_idx = indices[i];
+        let e_idx = indices[i + 1];
+
+        // 计算两个块的中心点坐标
+        let x1 = (s_idx % cols as usize) as u32 * block_size + block_size / 2;
+        let y1 = (s_idx / cols as usize) as u32 * block_size + block_size / 2;
+        let x2 = (e_idx % cols as usize) as u32 * block_size + block_size / 2;
+        let y2 = (e_idx / cols as usize) as u32 * block_size + block_size / 2;
+
+        draw_line_segment_mut(
+            &mut canvas,
+            (x1 as f32, y1 as f32),
+            (x2 as f32, y2 as f32),
+            line_color,
+        );
+
+        if i == 0 {
+            canvas.put_pixel(x1, y1, Rgba([255, 0, 0, 255])); // 起点是红色
+        }
+    }
+    canvas
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -124,7 +164,7 @@ fn main() {
     // 验证图像尺寸和块大小
     let (width, height) = img.dimensions();
     if validate_dimensions(width, height, BLOCK_SIZE).is_none() {
-        eprintln!("Error: Block size {} is too large.", BLOCK_SIZE);
+        eprintln!("Error: Image size too small for block size {}.", BLOCK_SIZE);
         exit(1);
     }
 
@@ -134,6 +174,21 @@ fn main() {
             eprintln!("Error processing image: {}", e);
             exit(1);
         });
+
+    #[cfg(feature = "visualize")]
+    if args.visualize {
+        use pixobfus::get_raw_gilbert_path;
+
+        let cols = width / BLOCK_SIZE;
+        let rows = height / BLOCK_SIZE;
+        let indices = get_raw_gilbert_path(cols, rows, seed);
+        let vis_img = generate_visual_path(img.width(), img.height(), &indices.as_slice(), 8);
+        vis_img
+            .save("debug_path.png")
+            .expect("Failed to save debug image");
+        println!("Successfully generated path visualization to debug_path.png");
+        return;
+    }
 
     // 生成输出路径并保存
     let output_path = generate_output_path(&args, is_restore_mode);
