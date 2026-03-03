@@ -3,16 +3,39 @@ name = "pixobfus"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 bip39 = "2.2.2"
-clap = { version = "4.5.60", features = ["derive"] }
-image = "0.25.9"
+clap = { version = "4.5.60", features = ["derive"], optional = true }
+getrandom = { version = "0.4.1", features = ["wasm_js"] }
+image = { version = "0.25.9", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
 rand = "0.10.0"
 rand_chacha = "0.10.0"
 sha2 = "0.10.9"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.114"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "pixobfus"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [profile.release]
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

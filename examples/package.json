@@ -1,0 +1,12 @@
+{
+  "name": "pixobfus-example",
+  "version": "1.0.0",
+  "description": "Example project using pixobfus WASM",
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build --target web",
+    "serve": "python3 -m http.server 8080"
+  },
+  "devDependencies": {},
+  "dependencies": {}
+}

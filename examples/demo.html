@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixobfus WASM Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 20px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+        .control-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        input[type="file"], input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .output {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        img {
+            max-width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .info {
+            padding: 10px;
+            background: #e3f2fd;
+            border-left: 3px solid #2196f3;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .error {
+            padding: 10px;
+            background: #ffebee;
+            border-left: 3px solid #f44336;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #c62828;
+        }
+        label {
+            font-weight: bold;
+            min-width: 100px;
+        }
+        select {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Pixobfus 图像混淆演示</h1>
+        
+        <div class="info">
+            使用前请先通过 <code>wasm-pack build --target web</code> 构建WASM模块
+        </div>
+
+        <div class="controls">
+            <div class="control-row">
+                <label>选择图像:</label>
+                <input type="file" id="imageInput" accept="image/*">
+            </div>
+            
+            <div class="control-row">
+                <label>密钥:</label>
+                <input type="text" id="keyInput" placeholder="输入密钥 (留空则使用默认密钥)">
+                <button id="generateKeyBtn" style="min-width: 120px;">🎲 生成随机密钥</button>
+            </div>
+            
+            <div class="control-row">
+                <label>曲线类型:</label>
+                <select id="curveSelect">
+                    <option value="true">Gilbert</option>
+                    <option value="false">Morton</option>
+                </select>
+            </div>
+            
+            <div class="control-row">
+                <button id="obfuscateBtn">🔒 混淆图像</button>
+                <button id="restoreBtn">🔓 还原图像</button>
+                <button id="downloadBtn" disabled>💾 下载结果</button>
+            </div>
+        </div>
+
+        <div id="message"></div>
+
+        <div class="output">
+            <h3>原始图像</h3>
+            <img id="originalImg" style="display:none;">
+            
+            <h3>处理结果</h3>
+            <img id="outputImg" style="display:none;">
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { obfuscate_image, restore_image, get_seed_from_key, generate_random_phrase } from '../pkg/pixobfus.js';
+
+        let imageData = null;
+        let resultData = null;
+        let wasmReady = false;
+
+        // 初始化WASM
+        async function initWasm() {
+            try {
+                await init();
+                wasmReady = true;
+                showMessage('WASM模块加载成功！', 'info');
+            } catch (e) {
+                showMessage('加载WASM失败: ' + e.message + '. 请确保已通过 wasm-pack build --target web 构建。', 'error');
+                document.getElementById('obfuscateBtn').disabled = true;
+                document.getElementById('restoreBtn').disabled = true;
+            }
+        }
+
+        function showMessage(msg, type = 'info') {
+            const msgEl = document.getElementById('message');
+            msgEl.innerHTML = `<div class="${type}">${msg}</div>`;
+        }
+
+        // 绑定事件监听器
+        function bindEventListeners() {
+            // 生成随机密钥
+            document.getElementById('generateKeyBtn').addEventListener('click', () => {
+                if (!wasmReady) {
+                    showMessage('WASM模块未加载', 'error');
+                    return;
+                }
+                try {
+                    const key = generate_random_phrase();
+                    document.getElementById('keyInput').value = key;
+                    showMessage(`已生成随机密钥: ${key}`, 'info');
+                } catch (e) {
+                    showMessage('生成密钥失败: ' + e.toString(), 'error');
+                }
+            });
+
+            // 加载图像
+            document.getElementById('imageInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                try {
+                    imageData = new Uint8Array(await file.arrayBuffer());
+                    const url = URL.createObjectURL(file);
+                    const img = document.getElementById('originalImg');
+                    img.src = url;
+                    img.style.display = 'block';
+                    showMessage(`图像加载成功: ${file.name}`, 'info');
+                } catch (e) {
+                    showMessage('读取图像失败: ' + e.message, 'error');
+                }
+            }
+        });
+
+        // 混淆图像
+        document.getElementById('obfuscateBtn').addEventListener('click', async () => {
+            if (!wasmReady) {
+                showMessage('WASM模块未加载', 'error');
+                return;
+            }
+            if (!imageData) {
+                showMessage('请先选择图像', 'error');
+                return;
+            }
+            
+            const key = document.getElementById('keyInput').value || 'default-key';
+            const useGilbert = document.getElementById('curveSelect').value === 'true';
+            
+            try {
+                showMessage('混淆中...', 'info');
+                const seed = get_seed_from_key(key);
+                console.log('使用种子:', seed);
+                
+                resultData = obfuscate_image(imageData, key, useGilbert);
+                displayResult(resultData);
+                showMessage(`混淆成功！密钥: ${key}, 曲线: ${useGilbert ? 'Gilbert' : 'Morton'}`, 'info');
+            } catch (e) {
+                showMessage('混淆失败: ' + e.toString(), 'error');
+            }
+        });
+
+        // 还原图像
+        document.getElementById('restoreBtn').addEventListener('click', async () => {
+            if (!wasmReady) {
+                showMessage('WASM模块未加载', 'error');
+                return;
+            }
+            if (!imageData) {
+                showMessage('请先选择图像', 'error');
+                return;
+            }
+            
+            const key = document.getElementById('keyInput').value;
+            if (!key) {
+                showMessage('还原需要密钥', 'error');
+                return;
+            }
+            
+            const useGilbert = document.getElementById('curveSelect').value === 'true';
+            
+            try {
+                showMessage('还原中...', 'info');
+                const seed = get_seed_from_key(key);
+                console.log('使用种子:', seed);
+                
+                resultData = restore_image(imageData, key, useGilbert);
+                displayResult(resultData);
+                showMessage('还原成功！', 'info');
+            } catch (e) {
+                showMessage('还原失败: ' + e.toString(), 'error');
+            }
+        });
+
+            // 下载结果
+            document.getElementById('downloadBtn').addEventListener('click', () => {
+                if (!resultData) {
+                    showMessage('没有可下载的结果', 'error');
+                    return;
+                }
+                
+                const blob = new Blob([resultData], { type: 'image/png' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'result.png';
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+        }
+
+        // 显示结果
+        function displayResult(data) {
+            const blob = new Blob([data], { type: 'image/png' });
+            const url = URL.createObjectURL(blob);
+            const img = document.getElementById('outputImg');
+            img.src = url;
+            img.style.display = 'block';
+            document.getElementById('downloadBtn').disabled = false;
+        }
+
+        bindEventListeners();
+        // 初始化
+        initWasm();
+    </script>
+</body>
+</html>

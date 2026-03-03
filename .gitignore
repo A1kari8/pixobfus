@@ -1,1 +1,6 @@
 /target
+pkg
+*.png
+*.jpg
+*.md
+*.py
