@@ -16,6 +16,7 @@ image = { version = "0.25.9", default-features = false, features = [
     "webp",
 ] }
 imageproc = { version = "0.26.1", optional = true }
+is-terminal = "0.4.17"
 rand = "0.10.0"
 rand_chacha = "0.10.0"
 sha2 = "0.10.9"

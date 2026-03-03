@@ -1,11 +1,13 @@
 use clap::{Parser, ValueEnum};
 use image::{GenericImageView, ImageFormat, RgbaImage};
+use is_terminal::IsTerminal;
 use pixobfus::{
-    BLOCK_SIZE, Curve as LibCurve, derive_seed, format_to_extension, generate_random_phrase,
-    process_image, validate_dimensions, validate_format,
+    BLOCK_SIZE, Curve as LibCurve, derive_seed, generate_random_phrase, process_image,
+    validate_dimensions, validate_format,
 };
+use std::env;
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, BufRead, Cursor, Read, Write};
 use std::path::Path;
 use std::process::exit;
 
@@ -43,83 +45,145 @@ struct Args {
 
     /// Secret key for obfuscation/restoration (can be a string or a number).
     /// - obfuscate: If not provided, a random key will be generated and displayed.
-    /// - restore: Required to reverse the obfuscation.
+    /// - restore: Required (via -k, PIXOBFUS_KEY env var, or interactive input).
     #[arg(short = 'k', long, value_name = "KEY", verbatim_doc_comment)]
     key: Option<String>,
+
+    /// Output generated key to file instead of stderr
+    #[arg(short = 'K', long, value_name = "FILE")]
+    key_file: Option<String>,
 
     /// Curve type for block rearrangement
     #[arg(short = 'c', long, value_enum, default_value = "gilbert")]
     curve: Curve,
 
     #[cfg(feature = "visualize")]
-    #[arg(short = 'v', long, default_value_t = false)]
+    #[arg(long, default_value_t = false)]
     visualize: bool,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
 
-    /// Input image file path
-    #[arg(required = true, num_args = 1..)]
+    /// Output format (png, jpeg, webp). If not specified, uses input format.
+    #[arg(short = 'f', long, value_name = "FORMAT")]
+    format: Option<String>,
+
+    /// Input image file path. If omitted and stdin is piped, reads from stdin.
+    #[arg(num_args = 0..)]
     input: Vec<String>,
 }
 
 /// 处理密钥逻辑
-fn handle_key(args: &Args, is_restore_mode: bool) -> u64 {
-    match args.key {
-        Some(ref k) => k.parse::<u64>().unwrap_or_else(|_| derive_seed(k)),
-        None => {
-            if is_restore_mode {
-                eprintln!("Error: Key (-k) is required for de-obfuscation.");
-                exit(1);
-            } else {
-                let phrase = generate_random_phrase();
-                println!("{}", phrase);
-                derive_seed(&phrase)
-            }
+fn handle_key(args: &Args, is_restore_mode: bool, stdin_used_for_input: bool) -> u64 {
+    // 优先使用-k参数
+    if let Some(ref k) = args.key {
+        return k.parse::<u64>().unwrap_or_else(|_| derive_seed(k));
+    }
+
+    // 检查环境变量PIXOBFUS_KEY
+    if let Ok(key_from_env) = env::var("PIXOBFUS_KEY") {
+        if !key_from_env.is_empty() {
+            return key_from_env
+                .parse::<u64>()
+                .unwrap_or_else(|_| derive_seed(&key_from_env));
         }
+    }
+
+    if is_restore_mode {
+        // 恢复操作需要密钥
+        if stdin_used_for_input {
+            // stdin被用于图片输入
+            eprintln!("Error: Key is required for restore operation.");
+            eprintln!("Provide key via -k option or PIXOBFUS_KEY environment variable.");
+            exit(1);
+        } else if io::stdin().is_terminal() {
+            // stdin是终端
+            eprint!("Enter key for restore: ");
+            io::stderr().flush().unwrap();
+            let mut input = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut input)
+                .unwrap_or_else(|e| {
+                    eprintln!("\nError reading key: {}", e);
+                    exit(1);
+                });
+            let key = input.trim();
+            if key.is_empty() {
+                eprintln!("Error: Key cannot be empty.");
+                exit(1);
+            }
+            key.parse::<u64>().unwrap_or_else(|_| derive_seed(key))
+        } else {
+            // stdin不是终端，无法交互
+            eprintln!("Error: Key is required for restore operation.");
+            eprintln!("Provide key via -k option or PIXOBFUS_KEY environment variable.");
+            exit(1);
+        }
+    } else {
+        // 混淆操作，生成随机密钥
+        let phrase = generate_random_phrase();
+
+        // 根据是否指定 key_file 决定输出方式
+        if let Some(ref key_file) = args.key_file {
+            // 输出到文件
+            fs::write(key_file, format!("{}\n", phrase)).unwrap_or_else(|e| {
+                eprintln!("Error writing key file '{}': {}", key_file, e);
+                exit(1);
+            });
+        } else {
+            // 输出到 stderr
+            eprintln!("Key: {}", phrase);
+        }
+
+        derive_seed(&phrase)
     }
 }
 
-/// 保存输出文件
-fn save_output(out_img: &RgbaImage, output_path: &str, format: ImageFormat) {
+/// 保存输出文件或输出到stdout
+fn save_output(out_img: &RgbaImage, output_path: &str, format: ImageFormat) -> Result<(), String> {
     let mut buffer = Cursor::new(Vec::new());
-    out_img.write_to(&mut buffer, format).unwrap();
+    out_img
+        .write_to(&mut buffer, format)
+        .map_err(|e| format!("Error encoding image: {}", e))?;
     let final_data = buffer.into_inner();
 
-    fs::write(output_path, final_data).unwrap_or_else(|e| {
-        eprintln!("Error writing file: {}", e);
-        exit(1);
-    });
+    if output_path == "-" {
+        // 输出到stdout
+        io::stdout()
+            .write_all(&final_data)
+            .map_err(|e| format!("Error writing to stdout: {}", e))?;
+    } else {
+        // 输出到文件
+        fs::write(output_path, final_data)
+            .map_err(|e| format!("Error writing file '{}': {}", output_path, e))?;
+    }
+    Ok(())
 }
 
 /// 生成输出文件路径
-fn generate_output_path(
-    input: &str,
-    output: Option<String>,
-    is_restore_mode: bool,
-    format: ImageFormat,
-    output_dir: Option<&str>,
-) -> String {
+fn generate_output_path(input: &str, output: Option<String>, output_dir: Option<&str>) -> String {
     if let Some(output_path) = output {
-        // 如果明确指定了output（单文件模式）
-        output_path
-    } else {
-        let path = Path::new(input);
-        let stem = path.file_stem().unwrap().to_str().unwrap();
-        let extension = format_to_extension(format);
-        let filename = if !is_restore_mode {
-            format!("{}_obfus.{}", stem, extension)
-        } else {
-            format!("{}_res.{}", stem, extension)
-        };
-
+        // 如果明确指定了output
         if let Some(dir) = output_dir {
-            // 如果有输出目录，将文件名放在该目录下
-            Path::new(dir).join(filename).to_str().unwrap().to_string()
+            // 多文件模式：output是目录，需要加上输入文件名
+            if input == "-" {
+                // stdin在多文件模式下输出到stdout
+                return "-".to_string();
+            }
+            let input_filename = Path::new(input).file_name().unwrap().to_str().unwrap();
+            Path::new(dir)
+                .join(input_filename)
+                .to_str()
+                .unwrap()
+                .to_string()
         } else {
-            // 否则在当前目录
-            filename
+            // 单文件模式：直接使用指定的output
+            output_path
         }
+    } else {
+        // 未指定output，输出到stdout
+        "-".to_string()
     }
 }
 
@@ -167,10 +231,18 @@ fn process_single_file(
     curve: LibCurve,
     is_restore_mode: bool,
     output_dir: Option<&str>,
+    output_format: Option<ImageFormat>,
 ) -> Result<(), String> {
-    // 读取输入文件
-    let file_bytes =
-        fs::read(input).map_err(|e| format!("Error reading input '{}': {}", input, e))?;
+    // 读取输入文件或从stdin读取
+    let file_bytes = if input == "-" {
+        let mut buffer = Vec::new();
+        io::stdin()
+            .read_to_end(&mut buffer)
+            .map_err(|e| format!("Error reading from stdin: {}", e))?;
+        buffer
+    } else {
+        fs::read(input).map_err(|e| format!("Error reading input '{}': {}", input, e))?
+    };
 
     // 检测并加载图像
     let img_format = image::guess_format(&file_bytes)
@@ -215,29 +287,121 @@ fn process_single_file(
         return Ok(());
     }
 
-    let output_path = generate_output_path(input, output, is_restore_mode, img_format, output_dir);
-    save_output(&out_img, &output_path, img_format);
+    // 确定输出格式（优先使用指定的格式，否则使用输入格式）
+    let final_format = output_format.unwrap_or(img_format);
+
+    let output_path = generate_output_path(input, output, output_dir);
+    save_output(&out_img, &output_path, final_format)?;
 
     Ok(())
 }
 
 fn main() {
-    let args = Args::parse_from(wild::args());
+    let mut args = Args::parse_from(wild::args());
+
+    // 如果没有提供输入文件，检查是否从stdin读取
+    if args.input.is_empty() {
+        if !io::stdin().is_terminal() {
+            // stdin被管道或重定向，自动从stdin读取
+            args.input.push("-".to_string());
+        } else {
+            // 既没有输入文件，stdin 也是终端
+            eprintln!("Error: No input file specified.");
+            eprintln!(
+                "Usage: {} -O|-R -k KEY [OPTIONS] <INPUT>",
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "pixobfus".to_string())
+            );
+            eprintln!(
+                "   or: cat image.png | {} -O|-R -k KEY [OPTIONS]",
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "pixobfus".to_string())
+            );
+            exit(1);
+        }
+    } else {
+        // 提供了输入文件，检查是否同时从stdin输入
+        if !io::stdin().is_terminal() {
+            eprintln!("Error: Cannot use both file input and stdin input simultaneously.");
+            eprintln!("Use either file paths or pipe from stdin, not both.");
+            exit(1);
+        }
+    }
 
     // 确定操作模式
     let is_restore_mode = args.restore;
 
-    // 处理密钥
-    let seed = handle_key(&args, is_restore_mode);
+    // 如果没有指定-o参数
+    if args.output.is_none() {
+        // 单文件模式且stdout不是TTY
+        if args.input.len() == 1 && !io::stdout().is_terminal() {
+            // 允许输出到stdout
+        } else if args.input.len() == 1 {
+            // 单文件模式但stdout是TTY
+            eprintln!(
+                "Error: Output file required. Use -o FILE to specify output, or redirect stdout."
+            );
+            eprintln!(
+                "Example: {} -O -k KEY input.png -o output.png",
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "pixobfus".to_string())
+            );
+            eprintln!(
+                "     or: {} -O -k KEY input.png > output.png",
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "pixobfus".to_string())
+            );
+            exit(1);
+        }
+    }
 
-    // 判断是否应该将output作为目录
+    // 解析输出格式
+    let output_format = if let Some(ref fmt) = args.format {
+        Some(match fmt.to_lowercase().as_str() {
+            "png" => ImageFormat::Png,
+            "jpeg" | "jpg" => ImageFormat::Jpeg,
+            "webp" => ImageFormat::WebP,
+            _ => {
+                eprintln!(
+                    "Error: Unsupported format '{}'. Use png, jpeg, or webp.",
+                    fmt
+                );
+                exit(1);
+            }
+        })
+    } else {
+        // 未指定格式，使用输入格式
+        None
+    };
+
+    // 检查stdin是否被用于图片输入
+    let stdin_used_for_input = args.input.iter().any(|i| i == "-");
+
+    // 处理密钥
+    let seed = handle_key(&args, is_restore_mode, stdin_used_for_input);
+
+    // 多文件模式下必须指定输出位置
+    if args.input.len() > 1 && args.output.is_none() {
+        eprintln!("Error: Multiple input files require an output directory (-o DIR).");
+        exit(1);
+    }
+
+    // 判断是否应该将output作为目录（多文件模式）
     let output_dir = if args.input.len() > 1 && args.output.is_some() {
         let dir = args.output.as_ref().unwrap();
-        fs::create_dir_all(dir).unwrap_or_else(|e| {
-            eprintln!("Error creating output directory: {}", e);
-            exit(1);
-        });
-        Some(dir.as_str())
+        if dir != "-" {
+            fs::create_dir_all(dir).unwrap_or_else(|e| {
+                eprintln!("Error creating output directory: {}", e);
+                exit(1);
+            });
+            Some(dir.as_str())
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -247,11 +411,9 @@ fn main() {
     let mut fail_count = 0;
 
     for input in &args.input {
-        let output = if output_dir.is_some() {
-            None
-        } else {
-            args.output.clone()
-        };
+        // 在多文件模式下，需要传递output（目录名）
+        // 在单文件模式下，直接传递output（文件名或None）
+        let output = args.output.clone();
 
         match process_single_file(
             input,
@@ -260,6 +422,7 @@ fn main() {
             args.curve.into(),
             is_restore_mode,
             output_dir,
+            output_format,
         ) {
             Ok(_) => {
                 success_count += 1;
@@ -278,7 +441,7 @@ fn main() {
         );
     }
 
-    if fail_count > 0 && success_count == 0 {
+    if fail_count > 0 || success_count == 0 {
         exit(1);
     }
 }
