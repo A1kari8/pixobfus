@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
 
 pub const BLOCK_SIZE: u32 = 8;
+const SALT: &str = "pixobfus_salt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Curve {
@@ -35,11 +36,13 @@ pub fn format_to_extension(format: image::ImageFormat) -> &'static str {
 /// 将字符串转为u64种子
 pub fn derive_seed(key: &str) -> u64 {
     let mut hasher = Sha256::new();
+    hasher.update(SALT.as_bytes());
     hasher.update(key.as_bytes());
     let result = hasher.finalize();
     // 取前8个字节
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&result[0..8]);
+    let bytes = result[0..8]
+        .try_into()
+        .expect("Slice with incorrect length");
     u64::from_le_bytes(bytes)
 }
 
