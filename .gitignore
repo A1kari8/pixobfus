@@ -4,3 +4,4 @@ pkg
 *.jpg
 *.md
 *.py
+!README.md

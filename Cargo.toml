@@ -3,6 +3,11 @@ name = "pixobfus"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata]
+description = "A tool for obfuscating images."
+repository = "https://github.com/A1kari8/pixobfus"
+license = "UNLICENSE"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
